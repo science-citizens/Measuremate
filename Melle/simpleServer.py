@@ -1,3 +1,5 @@
+# Simple server for receiving data from the sonar sensors
+
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)

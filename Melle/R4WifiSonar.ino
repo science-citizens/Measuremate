@@ -1,3 +1,5 @@
+// Arduino code that sends sonar data from multiple sensors through a multiplexer to a server.
+
 #include <SoftwareSerial.h>
 
 // Multiplexer select pins
@@ -7,8 +9,9 @@
 #define S3 7
 
 #define MUX_SIG 10  // RX pin for sonar sensor data
+#define MUX_SIG2 11  // TX pin for sonar sensor data
 
-SoftwareSerial sonarSerial(11, MUX_SIG);  // RX only, no TX needed
+SoftwareSerial sonarSerial(MUX_SIG2, MUX_SIG);
 
 void setup() {
     Serial.begin(57600);
@@ -34,7 +37,6 @@ void selectChannel(int channel) {
     digitalWrite(S2, (channel >> 2) & 1);
     digitalWrite(S3, (channel >> 3) & 1);
 
-    // Print debug info for pin states
     Serial.print("Pin states - S0: ");
     Serial.print((channel >> 0) & 1);
     Serial.print(", S1: ");
@@ -74,7 +76,6 @@ float getDistance() {
 
     sonarSerial.flush();
 
-    // Debug info for the raw data
     Serial.print("Raw data: ");
     for (int i = 0; i < 4; i++) {
         Serial.print(data[i], HEX);
@@ -82,7 +83,7 @@ float getDistance() {
     }
     Serial.println();
 
-    if (data[0] == 0xff) {  // Valid data frame
+    if (data[0] == 0xff) {  // Check if the first byte is 0xFF
         int sum = (data[0] + data[1] + data[2]) & 0x00FF;
         Serial.print("Checksum sum: ");
         Serial.println(sum);
@@ -92,8 +93,8 @@ float getDistance() {
             Serial.print("Distance (raw): ");
             Serial.println(distance);
 
-            if (distance > 280) {
-                distance = distance / 10;  // Convert to cm
+            if (distance > 280) { 
+                distance = distance / 10;
                 Serial.print("Distance: ");
                 Serial.print(distance);
                 Serial.println(" cm");
@@ -126,11 +127,11 @@ void loop() {
         Serial.print("Switching to sensor ");
         Serial.println(i);
 
-        selectChannel(i);  // Select the current channel on the MUX
-        delay(500);  // Delay between channel switches
+        selectChannel(i);
+        delay(500);
 
-        float distance = getDistance();  // Get distance from the selected sensor
-        clearSerialBuffer(sonarSerial);  // Clear the buffer after reading
+        float distance = getDistance();
+        clearSerialBuffer(sonarSerial);
 
         Serial.print("Sensor ");
         Serial.print(i);
