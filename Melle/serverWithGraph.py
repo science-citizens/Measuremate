@@ -1,84 +1,141 @@
-# Server with graphical representation of sonar data
-# This server receives data from sonar sensors and displays it in a bar chart using Dash and Plotly.
-
 from flask import Flask, request, jsonify
 import dash
+import statistics
 from dash import dcc, html
 from dash.dependencies import Input, Output
 import plotly.graph_objs as go
 import threading
 import time
 
+# Flask app
 app = Flask(__name__)
 
-# Store sonar data
-times = []
-sensor_1_data = []
-sensor_2_data = []
-sensor_3_data = []
+# Global variable for storing the latest classification
+latest_classification = "Nog geen data ontvangen"
 
-# Dash app setup
+# Storage for sonar data
+sensor_data = {
+    "sensor_1": [],
+    "sensor_2": [],
+    "sensor_3": [],
+    "sensor_4": [],
+    "timestamps": []
+}
+
+def classify_readings(sensor_values, near_threshold=30, equal_margin=10):
+    """
+    Classificeer de huidige meting van 4 sonars
+    :param sensor_values: lijst van 4 afstandsmetingen
+    :param near_threshold: afstand die als 'dichtbij' telt
+    :param equal_margin: verschil waarbij we afstanden als 'gelijk' zien
+    :return: classificatie (string), indices van sensoren die dichtbij iets zien
+    """
+    if len(sensor_values) != 4:
+        return "Ongeldige invoer", []
+
+    # Dichtbij = kleiner dan een drempel
+    near_indices = [i for i, v in enumerate(sensor_values) if v < near_threshold]
+
+    # Check of alle metingen ongeveer gelijk zijn
+    if max(sensor_values) - min(sensor_values) < equal_margin:
+        print("Alle sensoren zien ongeveer hetzelfde")
+        return "Groot/breed object (alle sensoren zien ongeveer hetzelfde)"
+
+    if len(near_indices) == 1:
+        print("Eén sensor ziet iets")
+        return f"Object bij sensor {near_indices[0] + 1}"
+    elif 1 < len(near_indices) < 4:
+        print("Meerdere sensoren zien iets")
+        return f"Meervoudige detectie: {len(near_indices)} sensoren zien iets"
+    elif len(near_indices) == 0:
+        print("Geen sensoren zien iets")
+        return "Geen object zichtbaar", []
+    else:
+        print("Onbekende situatie")
+        return "Onbekende situatie"
+
+# Dash app for live visualization
 dash_app = dash.Dash(__name__, server=app, routes_pathname_prefix='/dashboard/')
 
 dash_app.layout = html.Div([
-    html.H1("Live Sonar Sensor Data"),
+    html.H2("Live Sonar Sensor Readings"),
     dcc.Graph(id='live-graph'),
-    dcc.Interval(id='interval-update', interval=1000, n_intervals=0)  # Update every second
+    html.Div(id='classification-output', style={'fontSize': 20, 'marginTop': '20px', 'fontWeight': 'bold'}),
+    dcc.Interval(id='interval-update', interval=500, n_intervals=0)  # update every 2 seconds
 ])
 
-@dash_app.callback(Output('live-graph', 'figure'), [Input('interval-update', 'n_intervals')])
+@dash_app.callback(
+    [Output('live-graph', 'figure'),
+     Output('classification-output', 'children')],
+    [Input('interval-update', 'n_intervals')]
+)
+
 def update_graph(n):
-    """ Updates the bar chart with the latest sensor data. """
-    global sensor_1_data, sensor_2_data, sensor_3_data
+    if not sensor_data["sensor_1"]:
+        return go.Figure(), "Nog geen data ontvangen"
 
-    if not sensor_1_data:
-        distances = [0, 0, 0]  # Default values if no data yet
-    else:
-        distances = [sensor_1_data[-1], sensor_2_data[-1], sensor_3_data[-1]]  # Latest values
+    latest_values = [
+        sensor_data["sensor_1"][-1],
+        sensor_data["sensor_2"][-1],
+        sensor_data["sensor_3"][-1],
+        sensor_data["sensor_4"][-1]
+    ]
 
-    return {
-        'data': [
-            go.Bar(x=["Sensor 1", "Sensor 2", "Sensor 3"], y=distances, marker=dict(color=['red', 'blue', 'green']))
-        ],
-        'layout': go.Layout(
-            title='Sonar Sensor Readings',
+    # Update classification
+    latest_classification = classify_readings(latest_values)
+
+    # Build figure
+    fig = go.Figure(
+        data=[go.Scatter(
+            x=["Sensor 1", "Sensor 2", "Sensor 3", "Sensor 4"],
+            y=latest_values,
+            mode='lines+markers',
+            line=dict(color='royalblue', width=3),
+            marker=dict(size=8)
+        )],
+        layout=go.Layout(
+            title='Latest Sonar Sensor Values',
             xaxis={'title': 'Sensors'},
-            yaxis={'title': 'Distance (cm)', 'range': [0, max(distances) + 10]},
-            bargap=0.5
+            yaxis={'title': 'Distance (cm)', 'range': [0, max(latest_values) + 20]}
         )
-    }
+    )
 
+    return fig, latest_classification
 
 @app.route('/data', methods=['POST'])
 def receive_data():
-    """ Receives sonar data and updates the stored values. """
-    global times, sensor_1_data, sensor_2_data, sensor_3_data
     try:
         data = request.json
-        current_time = time.strftime("%H:%M:%S")
+        timestamp = time.strftime("%H:%M:%S")
 
-        # Append new data, keeping only the last 20 values
-        times.append(current_time)
-        sensor_1_data.append(data["sensor_1"])
-        sensor_2_data.append(data["sensor_2"])
-        sensor_3_data.append(data["sensor_3"])
+        # Verzamel actuele sensordata in een lijst
+        current_readings = []
+        for i in range(1, 5):
+            sensor_key = f"sensor_{i}"
+            if sensor_key in data:
+                sensor_data[sensor_key].append(data[sensor_key])
+                current_readings.append(data[sensor_key])
+                if len(sensor_data[sensor_key]) > 20:
+                    sensor_data[sensor_key].pop(0)
 
-        if len(times) > 20:
-            times.pop(0)
-            sensor_1_data.pop(0)
-            sensor_2_data.pop(0)
-            sensor_3_data.pop(0)
+        sensor_data["timestamps"].append(timestamp)
+        if len(sensor_data["timestamps"]) > 20:
+            sensor_data["timestamps"].pop(0)
 
-        print(f"Received Data: {data}")
-        return jsonify({"status": "success", "received": data})
+        print(f"[{timestamp}] Received: {data}")
+        return jsonify({
+            "status": "success",
+            "received": data
+        })
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 
+# Threaded Flask launch
 def run_flask():
-    """ Runs Flask in a separate thread. """
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
+# Main
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     dash_app.run_server(debug=True, port=8050, use_reloader=False)
