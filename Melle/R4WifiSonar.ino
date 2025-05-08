@@ -1,149 +1,202 @@
-// Arduino code that sends sonar data from multiple sensors through a multiplexer to a server.
-
+#include <WiFiS3.h>
 #include <SoftwareSerial.h>
+#include <ArduinoHttpClient.h>
+
+// WiFi & server instellingen
+const char* ssid = "Paricutin";
+const char* password = "3311495676";
+const char* serverAddress = "192.168.168.191";
+const int serverPort = 5000;
+
+WiFiClient wifiClient;
+HttpClient client(wifiClient, serverAddress, serverPort);
 
 // Multiplexer select pins
 #define S0 4
 #define S1 5
 #define S2 6
 #define S3 7
-
 #define MUX_SIG 10  // RX pin for sonar sensor data
-#define MUX_SIG2 11  // TX pin for sonar sensor data
 
-SoftwareSerial sonarSerial(MUX_SIG2, MUX_SIG);
+SoftwareSerial sonarSerial(11, MUX_SIG);  // RX only
 
 void setup() {
     Serial.begin(57600);
     sonarSerial.begin(9600);
-
-    // Set multiplexer control pins as output
     pinMode(S0, OUTPUT);
     pinMode(S1, OUTPUT);
     pinMode(S2, OUTPUT);
     pinMode(S3, OUTPUT);
 
     Serial.println("Setup complete!");
+    connectToWiFi();
 }
 
-// Function to select a channel on the multiplexer
-void selectChannel(int channel) {
-    Serial.print("Selecting channel: ");
-    Serial.println(channel);
+// Functie om Wi-Fi te verbinden
+void connectToWiFi() {
+    Serial.print("Connecting to WiFi...");
+    WiFi.begin(ssid, password);
 
-    // Set the multiplexer control pins based on the channel number
+    while (WiFi.status() != WL_CONNECTED) {
+        Serial.print(".");
+        delay(1000);
+    }
+    Serial.println("\nConnected to WiFi!");
+}
+
+// Functie om een kanaal op de multiplexer te selecteren
+void selectChannel(int channel) {
     digitalWrite(S0, (channel >> 0) & 1);  
     digitalWrite(S1, (channel >> 1) & 1);
     digitalWrite(S2, (channel >> 2) & 1);
     digitalWrite(S3, (channel >> 3) & 1);
-
-    Serial.print("Pin states - S0: ");
-    Serial.print((channel >> 0) & 1);
-    Serial.print(", S1: ");
-    Serial.print((channel >> 1) & 1);
-    Serial.print(", S2: ");
-    Serial.print((channel >> 2) & 1);
-    Serial.print(", S3: ");
-    Serial.println((channel >> 3) & 1);
 }
 
-// Function to read sonar sensor distance
+// Functie om sonarafstand te lezen
 float getDistance() {
-    unsigned char data[4] = {0x00, 0x00, 0x00, 0x00};
+    unsigned char data[4] = {};
     float distance = -1;
 
-    if (sonarSerial.available() != 0) {
-      Serial.println("Reading data from sonar...");
-    } else {
-      Serial.println("No serial data available");
-    }
+    clearSerialBuffer(sonarSerial);
+    delay(150);
 
-    // Read 4 bytes from sonar only if data is available
     while (sonarSerial.available() >= 4) {
-      for (int i = 0; i < 4; i++) {
-        data[i] = sonarSerial.read();
-      }
-
-      // Check if the first byte is 0xFF, indicating a valid frame
-      if (data[0] == 0xFF) {
-        break;  // Exit the loop if valid data is found
-      } else {
-        // If invalid frame, discard the data and try again
+        for (int i = 0; i < 4; i++) {
+            data[i] = sonarSerial.read();
+        }
+        if (data[0] == 0xFF) break;  
         clearSerialBuffer(sonarSerial);
         delay(500);
-      }
     }
 
     sonarSerial.flush();
 
-    Serial.print("Raw data: ");
-    for (int i = 0; i < 4; i++) {
-        Serial.print(data[i], HEX);
-        Serial.print(" ");
-    }
-    Serial.println();
-
-    if (data[0] == 0xff) {  // Check if the first byte is 0xFF
+    if (data[0] == 0xFF) {
         int sum = (data[0] + data[1] + data[2]) & 0x00FF;
-        Serial.print("Checksum sum: ");
-        Serial.println(sum);
-
-        if (sum == data[3]) {  // Checksum validation
+        if (sum == data[3]) {
             distance = (data[1] << 8) + data[2];
-            Serial.print("Distance (raw): ");
-            Serial.println(distance);
-
-            if (distance > 280) { 
-                distance = distance / 10;
-                Serial.print("Distance: ");
-                Serial.print(distance);
-                Serial.println(" cm");
-            } else {
-                Serial.println("Below the lower limit (distance < 280). Setting to -1.");
-                distance = -1;
+            if (distance > 280) {
+                return distance / 10.0;  
             }
-        } else {
-            Serial.println("Checksum ERROR");
         }
-    } else {
-        Serial.println("No valid frame detected");
+    }
+    return -1;
+}
+// Functie om een mediane filter toe te passen
+// Deze functie neemt een aantal metingen en retourneert de mediaan
+float medianFilter(int channel, int numSamples = 5) {
+    float values[5];
+
+    for (int i = 0; i < numSamples; i++) {
+        selectChannel(channel);
+        values[i] = getDistance();
+        delay(10);
     }
 
-    return distance;
+    // Sorteer de array
+    for (int i = 0; i < numSamples - 1; i++) {
+        for (int j = i + 1; j < numSamples; j++) {
+            if (values[j] < values[i]) {
+                float temp = values[i];
+                values[i] = values[j];
+                values[j] = temp;
+            }
+        }
+    }
+
+    // Return het middelste element
+    return values[numSamples / 2];
 }
 
-// Function to clear the serial buffer
+// Functie om de seriële buffer te legen
 void clearSerialBuffer(SoftwareSerial &serialPort) {
-    Serial.println("Clearing serial buffer...");
     while (serialPort.available()) {
-        serialPort.read();  // Read and discard any data
+        serialPort.read();
     }
 }
+
+// Functie om data naar de server te sturen
+void sendData(float distance1, float distance2) {
+    Serial.println("---- Sending Data to Server ----");
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi not connected. Cannot send data.");
+        return;
+    }
+
+    // Create JSON payload
+    String message = "{\"sensor1\": " + String(distance1) + ", \"sensor2\": " + String(distance2) + "}";
+    Serial.print("Payload: ");
+    Serial.println(message);
+
+    // Start HTTP request
+    Serial.println("Starting HTTP request...");
+    client.beginRequest();
+    client.post("/data");
+
+    // Send headers
+    client.sendHeader("Content-Type", "application/json");
+    client.sendHeader("Content-Length", message.length());
+
+    // Send body
+    client.beginBody();
+    client.print(message);
+    client.endRequest();
+
+    // Get response status
+    int statusCode = client.responseStatusCode();
+    String response = client.responseBody();
+
+    // Print debug info
+    Serial.print("HTTP Response Code: ");
+    Serial.println(statusCode);
+
+    if (statusCode == -3) {
+        Serial.println("Error -3: Connection failed. Possible causes:");
+        Serial.println("- Server might be unreachable.");
+        Serial.println("- Firewall or network issues.");
+        Serial.println("- Wrong server IP or port.");
+    } else if (statusCode < 0) {
+        Serial.println("HTTP request failed. Possible issues:");
+        Serial.println("- WiFi disconnected?");
+        Serial.println("- Server not running?");
+        Serial.println("- Wrong API endpoint?");
+    } else {
+        Serial.println("Server response received successfully!");
+    }
+
+    Serial.print("Server Response: ");
+    Serial.println(response);
+    Serial.println("--------------------------------");
+}
+
 
 void loop() {
-    Serial.println("Starting loop...");
+    Serial.println("Measuring distances...");
 
-    for (int i = 1; i < 4; i++) {  // Iterate through all 16 channels (0-15)
-        Serial.print("Switching to sensor ");
-        Serial.println(i);
+    float distance1 = medianFilter(1);
+    float distance2 = medianFilter(2);
+    float distance3 = medianFilter(3);
+    float distance4 = medianFilter(4);
 
-        selectChannel(i);
-        delay(500);
+    Serial.print("Sensor 1: ");
+    Serial.print(distance1);
+    Serial.println(" cm");
 
-        float distance = getDistance();
-        clearSerialBuffer(sonarSerial);
+    Serial.print("Sensor 2: ");
+    Serial.print(distance2);
+    Serial.println(" cm");
 
-        Serial.print("Sensor ");
-        Serial.print(i);
-        Serial.print(": ");
+    Serial.print("Sensor 3: ");
+    Serial.print(distance3);
+    Serial.println(" cm");
 
-        if (distance != -1) {
-            Serial.print(distance);
-            Serial.println(" cm");
-        } else {
-            Serial.println("No valid data");
-        }
-        delay(3000);
-    }
-    Serial.println("Loop completed. Restarting...");
+    Serial.print("Sensor 4: ");
+    Serial.print(distance4);
+    Serial.println(" cm");
+
+    sendData(distance1, distance2);
+
+    Serial.println("Waiting for next measurement...");
+    delay(5000);
 }

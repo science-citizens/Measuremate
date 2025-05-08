@@ -38,20 +38,15 @@ def classify_readings(sensor_values, near_threshold=30, equal_margin=10):
 
     # Check of alle metingen ongeveer gelijk zijn
     if max(sensor_values) - min(sensor_values) < equal_margin:
-        print("Alle sensoren zien ongeveer hetzelfde")
         return "Groot/breed object (alle sensoren zien ongeveer hetzelfde)"
 
     if len(near_indices) == 1:
-        print("Eén sensor ziet iets")
         return f"Object bij sensor {near_indices[0] + 1}"
     elif 1 < len(near_indices) < 4:
-        print("Meerdere sensoren zien iets")
         return f"Meervoudige detectie: {len(near_indices)} sensoren zien iets"
     elif len(near_indices) == 0:
-        print("Geen sensoren zien iets")
         return "Geen object zichtbaar", []
     else:
-        print("Onbekende situatie")
         return "Onbekende situatie"
 
 # Dash app for live visualization
