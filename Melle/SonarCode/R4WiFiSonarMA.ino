@@ -3,9 +3,9 @@
 #include <ArduinoHttpClient.h>
 
 // WiFi & server instellingen
-const char* ssid = "Paricutin";
-const char* password = "3311495676";
-const char* serverAddress = "192.168.168.191";
+const char* ssid = "KidsBoven";
+const char* password = "011167Jh1234!";
+const char* serverAddress = "192.168.68.128";
 const int serverPort = 5000;
 
 WiFiClient wifiClient;
@@ -58,7 +58,9 @@ float getDistance() {
     float distance = -1;
 
     clearSerialBuffer(sonarSerial);
-    delay(150);
+    delay(100);
+    
+    Serial.println(sonarSerial.available());
 
     while (sonarSerial.available() >= 4) {
         for (int i = 0; i < 4; i++) {
@@ -66,11 +68,12 @@ float getDistance() {
         }
         if (data[0] == 0xFF) break;  
         clearSerialBuffer(sonarSerial);
-        delay(500);
+        delay(100);
     }
 
     sonarSerial.flush();
 
+    // Serial.println(data[0]);
     if (data[0] == 0xFF) {
         int sum = (data[0] + data[1] + data[2]) & 0x00FF;
         if (sum == data[3]) {
@@ -82,30 +85,27 @@ float getDistance() {
     }
     return -1;
 }
-// Functie om een mediane filter toe te passen
-// Deze functie neemt een aantal metingen en retourneert de mediaan
-float medianFilter(int channel, int numSamples = 5) {
-    float values[5];
+
+// Functie om een moving average filter toe te passen
+float movingAverageFilter(int channel, int numSamples = 2) {
+    float sum = 0;
+    int validSamples = 0;
 
     for (int i = 0; i < numSamples; i++) {
         selectChannel(channel);
-        values[i] = getDistance();
+        float reading = getDistance();
+        Serial.println(reading);
+
+        if (reading > 0) { // alleen geldige metingen meenemen
+            sum += reading;
+            validSamples++;
+        }
+
         delay(10);
     }
 
-    // Sorteer de array
-    for (int i = 0; i < numSamples - 1; i++) {
-        for (int j = i + 1; j < numSamples; j++) {
-            if (values[j] < values[i]) {
-                float temp = values[i];
-                values[i] = values[j];
-                values[j] = temp;
-            }
-        }
-    }
-
-    // Return het middelste element
-    return values[numSamples / 2];
+    if (validSamples == 0) return -1; // geen geldige metingen
+    return sum / validSamples;
 }
 
 // Functie om de seriële buffer te legen
@@ -116,7 +116,7 @@ void clearSerialBuffer(SoftwareSerial &serialPort) {
 }
 
 // Functie om data naar de server te sturen
-void sendData(float distance1, float distance2) {
+void sendData(float distance1, float distance2, float distance3, float distance4) {
     Serial.println("---- Sending Data to Server ----");
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -125,7 +125,7 @@ void sendData(float distance1, float distance2) {
     }
 
     // Create JSON payload
-    String message = "{\"sensor1\": " + String(distance1) + ", \"sensor2\": " + String(distance2) + "}";
+    String message = "{\"sensor_1\": " + String(distance1) + ", \"sensor_2\": " + String(distance2) + ", \"sensor_3\": " + String(distance3) + ", \"sensor_4\": " + String(distance4) + "}";
     Serial.print("Payload: ");
     Serial.println(message);
 
@@ -174,10 +174,10 @@ void sendData(float distance1, float distance2) {
 void loop() {
     Serial.println("Measuring distances...");
 
-    float distance1 = medianFilter(1);
-    float distance2 = medianFilter(2);
-    float distance3 = medianFilter(3);
-    float distance4 = medianFilter(4);
+    float distance1 = movingAverageFilter(7);
+    float distance2 = movingAverageFilter(5);
+    float distance3 = movingAverageFilter(3);
+    float distance4 = movingAverageFilter(1);
 
     Serial.print("Sensor 1: ");
     Serial.print(distance1);
@@ -195,8 +195,8 @@ void loop() {
     Serial.print(distance4);
     Serial.println(" cm");
 
-    sendData(distance1, distance2);
+    sendData(distance1, distance2, distance3, distance4);
 
     Serial.println("Waiting for next measurement...");
-    delay(5000);
+    delay(10);
 }
