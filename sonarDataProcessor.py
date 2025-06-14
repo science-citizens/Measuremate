@@ -1,18 +1,16 @@
-# Script voor het verwerken van sonargegevens en foutdetectie
-# Melle - Sonar Data Processor
-
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 # Configuratie
-EXPECTED = 45
+EXPECTED = 44
 MARGIN = 3
 LOWER = EXPECTED - MARGIN
 UPPER = EXPECTED + MARGIN
 STABLE_STD_THRESHOLD = 0.5  # voor 'te stabiel'
 
 # Inlezen
-df = pd.read_csv("Melle\SonarData\SonarDataNoProc.csv")
+df = pd.read_csv("Melle\SonarData\Threshold\SonarDataThreshold.csv")
 df.columns = ['timestamp', 'sensor_1', 'sensor_2', 'sensor_3', 'sensor_4']
 df['timestamp'] = pd.to_datetime(df['timestamp'], format='%H:%M:%S')
 
@@ -21,51 +19,49 @@ error_flags = {}
 for col in df.columns[1:]:
     error_flags[col] = ~df[col].between(LOWER, UPPER)
 
-# Voeg foutkolommen toe aan DataFrame
 for col in error_flags:
     df[f"{col}_error"] = error_flags[col]
 
-# Statistieken per sensor
-print("📊 Sensorstatistieken:")
-total_errors = 0
-total_measurements = 0
+# Bereken foutpercentages per sensor
+sensors = df.columns[1:5]
+error_percentages = [df[f"{col}_error"].mean() * 100 for col in sensors]
 
-for col in df.columns[1:5]:
-    sensor_vals = df[col]
-    errors = df[f"{col}_error"].sum()
-    total = len(sensor_vals)
-    total_errors += errors
-    total_measurements += total
+# Begin plotting
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), gridspec_kw={'height_ratios': [4, 1]})
 
-    print(f"\n{col}:")
-    print(f"  Fouten: {errors} ({(errors/total)*100:.2f}%)")
-    print(f"  Gemiddelde: {sensor_vals.mean():.2f} cm")
-    print(f"  Standaarddeviatie: {sensor_vals.std():.2f} cm")
-    print(f"  Minimum: {sensor_vals.min():.2f} cm")
-    print(f"  Maximum: {sensor_vals.max():.2f} cm")
-    if sensor_vals.std() < STABLE_STD_THRESHOLD:
-        print("  ⚠️  Verdacht stabiel gedrag (mogelijk defect sensor)")
+colors = ['blue', 'green', 'orange', 'purple']
 
-# Algemene foutmarge
-general_error_percentage = (total_errors / total_measurements) * 100
-print("\n🧮 Algemene foutanalyse:")
-print(f"  Totaal aantal metingen: {total_measurements}")
-print(f"  Totaal aantal fouten: {total_errors}")
-print(f"  Totale foutmarge: {general_error_percentage:.2f}%")
-
-# Visualisatie: fouten per sensor
-plt.figure(figsize=(10, 6))
-for i, col in enumerate(df.columns[1:5], start=1):
-    plt.plot(df['timestamp'], df[col], label=col)
+# Plot afstandsmetingen met fouten rood gemarkeerd
+for i, col in enumerate(sensors):
+    ax1.plot(df['timestamp'], df[col], label=col, color=colors[i])
     error_indices = df[df[f"{col}_error"]].index
-    plt.scatter(df.loc[error_indices, 'timestamp'], df.loc[error_indices, col], color='red', label=f"{col} fout" if i == 1 else "")
+    ax1.scatter(df.loc[error_indices, 'timestamp'], df.loc[error_indices, col], color='red', s=30, label=f"{col} fout" if i == 0 else "")
 
-plt.axhline(LOWER, color='gray', linestyle='--', linewidth=1)
-plt.axhline(UPPER, color='gray', linestyle='--', linewidth=1)
-plt.title("Sonarmetingen met fouten (rood)")
-plt.xlabel("Tijd")
-plt.ylabel("Afstand (cm)")
-plt.legend()
+# Drempels als lijnen
+ax1.axhline(LOWER, color='gray', linestyle='--', linewidth=1, label='Drempel ondergrens')
+ax1.axhline(UPPER, color='gray', linestyle='--', linewidth=1, label='Drempel bovengrens')
+
+ax1.set_ylabel('Afstand (cm)')
+ax1.set_title('Sonarmetingen met foutmarkering')
+ax1.legend(loc='upper right')
+ax1.grid(True)
+
+# Verbeterde tijdsas (per minuut)
+ax1.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
+ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+fig.autofmt_xdate(rotation=45)
+
+# Staafdiagram foutpercentages per sensor (geen sharex!)
+ax2.bar(sensors, error_percentages, color=colors)
+ax2.set_ylim(0, max(error_percentages) * 1.2)
+ax2.set_ylabel('Foutpercentage (%)')
+ax2.set_title('Foutpercentage per sensor')
+ax2.grid(axis='y', linestyle='--', alpha=0.7)
+
+# Toon percentage boven elke staaf
+for i, v in enumerate(error_percentages):
+    ax2.text(i, v + 0.5, f"{v:.1f}%", ha='center', fontsize=10)
+
 plt.tight_layout()
-plt.grid(True)
+plt.savefig("Melle/SonarData/Fotos/SonarDataAvarage2.png", dpi=300, bbox_inches='tight')
 plt.show()
