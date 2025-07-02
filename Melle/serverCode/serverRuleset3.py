@@ -7,18 +7,18 @@ import threading
 import dash
 import time
 
-# Flask app
+# === Flask server voor het ontvangen van sensor data ===
 app = Flask(__name__)
 
-# Dash app for live visualization
+# === Dash webdashboard voor realtime visualisatie ===
 dash_app = dash.Dash(__name__, server=app, routes_pathname_prefix='/dashboard/')
 
-# Constants
-MAX_HISTORY = 5
-MAX_VALUES = 20
-MOVEMENT_THRESHOLD = 4
+# === Configuratieinstellingen ===
+MAX_HISTORY = 5             # Niet in gebruik in deze versie, maar gereserveerd voor uitbreiding
+MAX_VALUES = 20             # Aantal meetpunten dat per sensor wordt bijgehouden
+MOVEMENT_THRESHOLD = 4      # Drempelwaarde om beweging als significant te beschouwen
 
-# Globale opslag
+# === Sensor data opslagstructuur ===
 sensor_data = {
     "sensor_1": [],
     "sensor_2": [],
@@ -27,8 +27,10 @@ sensor_data = {
     "timestamps": []
 }
 
+# === Tijdreeksenbuffer met de laatste 2 metingen (voor bewegingsanalyse) ===
 sensor_history = deque(maxlen=2)
 
+# === Functie voor het analyseren van beweging tussen twee meetmomenten ===
 def analyseer_beweging(history, threshold=MOVEMENT_THRESHOLD):
     if len(history) < 2:
         return "Onvoldoende gegevens"
@@ -45,6 +47,7 @@ def analyseer_beweging(history, threshold=MOVEMENT_THRESHOLD):
         else:
             trends.append("gelijk")
 
+    # Herken bekende patronen op basis van trends
     if trends == ["dichterbij"] * 4:
         return "Object komt dichterbij"
     elif trends == ["verderaf"] * 4:
@@ -56,14 +59,15 @@ def analyseer_beweging(history, threshold=MOVEMENT_THRESHOLD):
     else:
         return f"Beweging per sensor: {', '.join(trends)}"
 
-# Dash layout
+# === Dash layout opbouw ===
 dash_app.layout = html.Div([
     html.H2("Live Sonar Sensor Readings"),
     dcc.Graph(id='live-graph'),
     html.Div(id='classification-output', style={'fontSize': 20, 'marginTop': '20px', 'fontWeight': 'bold'}),
-    dcc.Interval(id='interval-update', interval=1000, n_intervals=0)
+    dcc.Interval(id='interval-update', interval=1000, n_intervals=0)  # Update elke seconde
 ])
 
+# === Callback functie die de grafiek en bewegingsanalyse bijwerkt ===
 @dash_app.callback(
     [Output('live-graph', 'figure'),
      Output('classification-output', 'children')],
@@ -73,6 +77,7 @@ def update_graph(n):
     if not sensor_data["sensor_1"]:
         return go.Figure(), "Nog geen data ontvangen"
 
+    # Pak de nieuwste waarden per sensor
     latest_values = [
         sensor_data["sensor_1"][-1],
         sensor_data["sensor_2"][-1],
@@ -80,9 +85,11 @@ def update_graph(n):
         sensor_data["sensor_4"][-1]
     ]
 
+    # Voeg toe aan de bewegingsgeschiedenis
     sensor_history.append(latest_values)
     beweging = analyseer_beweging(sensor_history)
 
+    # Genereer de grafiek
     fig = go.Figure(
         data=[go.Scatter(
             x=["Sensor 1", "Sensor 2", "Sensor 3", "Sensor 4"],
@@ -100,6 +107,7 @@ def update_graph(n):
 
     return fig, beweging
 
+# === API endpoint om sensor data te ontvangen via POST request ===
 @app.route('/data', methods=['POST'])
 def receive_data():
     if not request.is_json:
@@ -110,6 +118,7 @@ def receive_data():
         timestamp = time.strftime("%H:%M:%S")
         current_readings = []
 
+        # Verwerk data per sensor
         for i in range(1, 5):
             key = f"sensor_{i}"
             value = data.get(key)
@@ -118,6 +127,8 @@ def receive_data():
 
             sensor_data[key].append(value)
             current_readings.append(value)
+
+            # Beperk de hoeveelheid opgeslagen data
             if len(sensor_data[key]) > MAX_VALUES:
                 sensor_data[key].pop(0)
 
@@ -132,11 +143,11 @@ def receive_data():
         print(f"Fout bij verwerken van data: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Flask in aparte thread
+# === Start de Flask server in een aparte thread, zodat Dash parallel draait ===
 def run_flask():
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
-# Main
+# === Startpunt van de applicatie ===
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()

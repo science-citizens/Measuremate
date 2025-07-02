@@ -7,22 +7,22 @@ import threading
 import dash
 import time
 
-# Flask app
+# Initialiseer Flask-app voor het ontvangen van data via HTTP
 app = Flask(__name__)
 
-# Dash app for live visualization
+# Initialiseer Dash-app voor live visualisatie in de browser
 dash_app = dash.Dash(__name__, server=app, routes_pathname_prefix='/dashboard/')
 
-# Constants
-MAX_HISTORY = 5
-MAX_VALUES = 20
-GRADIENT_THRESHOLD = 5
-MOVEMENT_THRESHOLD = 4
-NEAR_THRESHOLD = 38
-EQUAL_MARGIN = 3
-SENSOR_POSITIONS = [0, 17, 26, 43]  # Posities in cm
+# Configuratie en drempelwaarden
+MAX_HISTORY = 5               # Aantal tijdstappen voor visualisatie
+MAX_VALUES = 20               # Max aantal waarden per sensor om op te slaan
+GRADIENT_THRESHOLD = 5        # Drempel voor hellingclassificatie
+MOVEMENT_THRESHOLD = 4        # Drempel voor bewegingsanalyse
+NEAR_THRESHOLD = 38           # Afstand waarbij object als "dichtbij" wordt beschouwd
+EQUAL_MARGIN = 3              # Acceptabel verschil voor "gelijke afstand"
+SENSOR_POSITIONS = [0, 17, 26, 43]  # Afstanden tussen de sensoren in cm
 
-# Globale opslag
+# Opslagstructuur voor sensordata
 sensor_data = {
     "sensor_1": [],
     "sensor_2": [],
@@ -31,15 +31,17 @@ sensor_data = {
     "timestamps": []
 }
 
+# Tijdgeschiedenis van metingen
 sensor_history = deque(maxlen=2)
 
+# Functie om beweging over tijd te analyseren
 def analyseer_beweging(history, threshold=MOVEMENT_THRESHOLD):
     if len(history) < 2:
         return "Onvoldoende gegevens"
 
     vorige, laatste = history[0], history[1]
-
     trends = []
+
     for i in range(4):
         verschil = laatste[i] - vorige[i]
         if verschil > threshold:
@@ -49,6 +51,7 @@ def analyseer_beweging(history, threshold=MOVEMENT_THRESHOLD):
         else:
             trends.append("gelijk")
 
+    # Simpele regelgebaseerde classificatie van beweging
     if trends == ["dichterbij"] * 4:
         return "Object komt dichterbij"
     elif trends == ["verderaf"] * 4:
@@ -60,14 +63,12 @@ def analyseer_beweging(history, threshold=MOVEMENT_THRESHOLD):
     else:
         return f"Beweging per sensor: {', '.join(trends)}"
 
+# Analyseer helling (gradient) over sensoren
 def analyseer_gradient(sensor_values, threshold=GRADIENT_THRESHOLD):
     if len(sensor_values) != 4:
         return "Ongeldige invoer"
 
     gradients = [sensor_values[i+1] - sensor_values[i] for i in range(3)]
-
-    recht_links = abs(gradients[0]) < threshold and abs(gradients[1]) < threshold
-    recht_rechts = abs(gradients[1]) < threshold and abs(gradients[2]) < threshold
 
     if all(abs(g) < threshold for g in gradients):
         return "Object recht voor het systeem"
@@ -86,6 +87,7 @@ def analyseer_gradient(sensor_values, threshold=GRADIENT_THRESHOLD):
     else:
         return "Onregelmatig object of meerdere reflecties"
 
+# Positieanalyse op basis van afstand en spreiding
 def analyseer_posities(sensor_values, near_threshold=NEAR_THRESHOLD, equal_margin=EQUAL_MARGIN):
     if len(sensor_values) != 4:
         return "Ongeldige invoer"
@@ -122,7 +124,7 @@ def analyseer_posities(sensor_values, near_threshold=NEAR_THRESHOLD, equal_margi
 
     return f"{beschrijving} (geschatte breedte: {breedte} cm)"
 
-# Dash layout
+# Dash layout configuratie
 dash_app.layout = html.Div([
     html.H2("Live Sonar Sensor Readings"),
     dcc.Graph(id='live-graph'),
@@ -130,6 +132,7 @@ dash_app.layout = html.Div([
     dcc.Interval(id='interval-update', interval=500, n_intervals=0)
 ])
 
+# Dash callback om data en classificatie weer te geven
 @dash_app.callback(
     [Output('live-graph', 'figure'),
      Output('classification-output', 'children')],
@@ -171,6 +174,7 @@ def update_graph(n):
 
     return fig, combined_output
 
+# Flask route voor het ontvangen van sensordata via HTTP POST
 @app.route('/data', methods=['POST'])
 def receive_data():
     if not request.is_json:
@@ -203,11 +207,11 @@ def receive_data():
         print(f"Fout bij verwerken van data: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Flask in aparte thread
+# Draai de Flask-server in een aparte thread zodat Dash parallel draait
 def run_flask():
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
-# Main
+# Start zowel Flask als Dash
 if __name__ == '__main__':
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
