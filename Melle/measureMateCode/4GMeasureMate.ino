@@ -9,12 +9,12 @@
 #include <BlynkSimpleTinyGSM.h>
 
 // Sensorpinnen
-#define GL136_PIN A0    // Analoge pin voor GL-136 waterniveausensor
-#define FLOW_PIN 5      // Digitale input voor flowmeterpulsen
+#define GL136_PIN A1    // Analoge pin voor GL-136 waterniveausensor
+#define FLOW_PIN 3  // Digitale input voor flowmeterpulsen
 
 // LTE-modem besturingspinnen
 #define LTE_RESET_PIN 6
-#define LTE_PWRKEY_PIN 8
+#define LTE_PWRKEY_PIN 5
 #define LTE_FLIGHT_PIN 7
 
 // Mobiele netwerkinstellingen
