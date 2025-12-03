@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
 """
-Picamera2 motion-triggered stills met MOG2 + upload naar web-API.
+Picamera2 motion-triggered stills met MOG2.
 - Analyseert lores stream voor beweging (snel)
 - Maakt alleen een full-res JPEG bij "echte" beweging
-- Slaat lokaal op én uploadt naar je Next.js endpoint
+- Slaat lokaal op in de captures-map
 """
 
 import os, time
@@ -12,13 +11,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import requests
 from picamera2 import Picamera2
 from libcamera import Transform
 
 # Opslag
 SAVE_DIR = str(Path.home() / "projects" / "measuremate" / "captures")
-TITLE_PREFIX = "PiCam v3"
 
 # Full-res still settings
 PHOTO_WIDTH, PHOTO_HEIGHT = 1920, 1080
@@ -36,48 +33,15 @@ MIN_BLOB_AREA = 1900
 SUSTAINED_FRAMES = 5
 COOLDOWN_SEC = 3
 MAX_GLOBAL_MOTION_RATIO = 0.40  # >40% bewegende pixels = wind -> skip
-ROI = None  
-
-#Upload-instellingen
-API_URL = os.getenv("MEASUREMATE_UPLOAD_URL", "https://measurematelucasstage.vercel.app/api/upload")
-UPLOAD_SECRET = os.getenv("MEASUREMATE_UPLOAD_SECRET", "cosmoiseenredelijkdikkehond")
-REQUEST_TIMEOUT = 60
-UPLOAD_RETRIES = 2  # naast de eerste poging
+ROI = None  # eventueel (x, y, w, h)
 
 
+def ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
 
-def ensure_dir(p): os.makedirs(p, exist_ok=True)
-def ts_name(): return datetime.now().strftime("%Y-%m-%d_%H-%M-%S.jpg")
 
-
-def upload_file(filepath: str, url: str, secret: str, title: str) -> bool:
-
-    if not os.path.exists(filepath):
-        print("Upload: bestand niet gevonden:", filepath)
-        return False
-
-    for attempt in range(UPLOAD_RETRIES + 1):
-        try:
-            with open(filepath, "rb") as f:
-                files = {"file": (os.path.basename(filepath), f, "image/jpeg")}
-                data = {"type": "image", "title": title}
-                headers = {"Authorization": f"Bearer {secret}"}
-
-                r = requests.post(
-                    url, headers=headers, data=data, files=files, timeout=REQUEST_TIMEOUT
-                )
-
-            if 200 <= r.status_code < 300:
-                print(f"Upload OK ({r.status_code}) -> {url}")
-                return True
-
-        except requests.RequestException as e:
-            print(f"Upload fout poging {attempt+1}/{UPLOAD_RETRIES+1}: {e}")
-
-        time.sleep(1.5)  # kleine backoff
-
-    return False
-
+def ts_name():
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S.jpg")
 
 
 def main():
@@ -105,7 +69,7 @@ def main():
     sustained = 0
     last_capture = 0.0
 
-    print("Motion detector + uploader")
+    print("Motion detector met MOG2 (alleen lokaal opslaan)")
     try:
         while True:
             # Lores frame (YUV420) -> BGR
@@ -168,10 +132,6 @@ def main():
                 stamp = datetime.now().strftime('%H:%M:%S')
                 print(f"[{stamp}] Beweging! Opgeslagen: {out_path}")
 
-                title = f"{TITLE_PREFIX} {filename}"
-                ok = upload_file(out_path, API_URL, UPLOAD_SECRET, title)
-                if not ok:
-                    print("Upload niet gelukt; bestand blijft lokaal bewaard.")
                 last_capture = time.time()
                 sustained = 0
 
