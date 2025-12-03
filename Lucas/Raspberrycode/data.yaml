@@ -1,0 +1,5 @@
+train: dataset3/train/images
+val: dataset3/valid/images
+test: dataset3/test/images
+
+#verander deze paden naar de juiste mappen op uw systeem
