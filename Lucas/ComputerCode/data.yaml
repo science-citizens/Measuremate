@@ -1,0 +1,13 @@
+train: dataset/train/images
+val: dataset/valid/images
+test: dataset/test/images
+
+nc: 1
+names: ['Bird']
+
+roboflow:
+  workspace: pointer-brwfi
+  project: vogel-n4b0h
+  version: 3
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/pointer-brwfi/vogel-n4b0h/dataset/3
