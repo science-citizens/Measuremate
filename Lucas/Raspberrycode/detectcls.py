@@ -31,7 +31,7 @@ CLS_MODEL_PATH    = "runs/yolov8n-cls2/weights/best_ncnn_model"  # YOLO classifi
 
 # Camera resoluties
 HIGH_RES = (1920, 1080)     # hoofdstream (breedte, hoogte)
-LOW_RES  = (640, 390)       # lores stream voor detectie (liefst zelfde als imgsz detectiemodel)
+LOW_RES  = (640, 640)       # lores stream voor detectie (liefst zelfde als imgsz detectiemodel)
 
 # Detectie instellingen
 DETECT_CONF    = 0.6        # minimale confidence voor detecties
@@ -365,3 +365,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
