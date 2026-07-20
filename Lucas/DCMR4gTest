@@ -1,0 +1,954 @@
+/*
+  Maduino Zero 4G + SIM7600G-H
+  Antenne-, netwerk- en MeasureMate API-test
+
+  Functies:
+  - Modem automatisch inschakelen
+  - SIM-status controleren
+  - CSQ, RSSI, RSRP en RSRQ tonen
+  - Provider en LTE-band tonen
+  - Verbinden met de APN
+  - GET /api/health uitvoeren
+  - POST /api/sensor-data uitvoeren
+  - Elke 30 seconden het antennesignaal opnieuw meten
+
+  Board:
+  - Maduino Zero 4G
+  - SIM7600G-H
+  - Debug: SerialUSB
+  - Modem: Serial1
+  - Modembaudrate: 115200
+  - PWRKEY: pin 6
+*/
+
+#define TINY_GSM_MODEM_SIM7600
+#include <TinyGsmClient.h>
+
+// ==================================================
+// Instellingen
+// ==================================================
+
+#define SerialMon SerialUSB
+#define SerialAT  Serial1
+
+#define MODEM_PWRKEY 6
+#define MODEM_BAUD   115200
+
+const char APN[]      = "globaldata.iot";
+const char APN_USER[] = "";
+const char APN_PASS[] = "";
+
+// Gebruik hier een nieuwe API-key.
+const char API_KEY[] = "070b752c-5962-4e14-b13e-47cd69784610";
+
+const char HEALTH_URL[] =
+  "https://measuremate.vercel.app/api/health";
+
+const char DATA_URL[] =
+  "https://measuremate.vercel.app/api/sensor-data";
+
+// Voorbeeldwaarde die naar Vercel wordt verstuurd.
+const float SENSOR_VALUE = 23.5f;
+
+// Antennesignaal iedere 30 seconden opnieuw tonen.
+const unsigned long SIGNAL_INTERVAL = 30000UL;
+
+unsigned long lastSignalTest = 0;
+
+TinyGsm modem(SerialAT);
+
+
+// ==================================================
+// Functiedeclaraties
+// ==================================================
+
+String sendAT(
+  const String& command,
+  unsigned long timeout = 3000
+);
+
+String readModem(unsigned long timeout);
+
+String findLine(
+  const String& response,
+  const char* prefix
+);
+
+bool modemResponds();
+bool startModem();
+bool waitForNetworkAndData();
+
+void pulsePowerKey();
+
+void printAntennaInformation();
+void printCSQ(const String& response);
+void printCESQ(const String& response);
+void printSignalRating(int rsrp);
+
+void configureSSL();
+
+bool waitForDownloadPrompt(unsigned long timeout);
+String waitForHttpAction(unsigned long timeout);
+
+bool testHealthEndpoint();
+bool postSensorData(float value);
+
+
+// ==================================================
+// Setup
+// ==================================================
+
+void setup() {
+  SerialMon.begin(115200);
+  delay(3000);
+
+  SerialMon.println();
+  SerialMon.println("======================================");
+  SerialMon.println(" Maduino SIM7600G-H MeasureMate test");
+  SerialMon.println("======================================");
+
+  SerialAT.begin(MODEM_BAUD);
+  delay(1000);
+
+  // -----------------------------------------------
+  // Modem inschakelen
+  // -----------------------------------------------
+
+  if (!startModem()) {
+    SerialMon.println();
+    SerialMon.println("FOUT: modem reageert niet.");
+    SerialMon.println(
+      "Controleer voeding, Serial1 en PWRKEY."
+    );
+    return;
+  }
+
+  // Echo uitschakelen.
+  sendAT("ATE0");
+
+  // -----------------------------------------------
+  // Algemene modemcontrole
+  // -----------------------------------------------
+
+  SerialMon.println();
+  SerialMon.println("Modemcontrole:");
+
+  sendAT("AT+CPIN?", 5000);
+  sendAT("AT+CFUN?", 5000);
+  sendAT("AT+CGMM", 5000);
+  sendAT("AT+CGMR", 5000);
+
+  // -----------------------------------------------
+  // Antenne testen voordat de dataverbinding start
+  // -----------------------------------------------
+
+  printAntennaInformation();
+
+  // -----------------------------------------------
+  // TinyGSM initialiseren
+  // -----------------------------------------------
+
+  SerialMon.println();
+  SerialMon.println("TinyGSM initialiseren...");
+
+  if (!modem.init()) {
+    SerialMon.println(
+      "modem.init() mislukt. Modem herstarten..."
+    );
+
+    if (!modem.restart()) {
+      SerialMon.println("modem.restart() mislukt.");
+      return;
+    }
+  }
+
+  SerialMon.print("Modem: ");
+  SerialMon.println(modem.getModemInfo());
+
+  // -----------------------------------------------
+  // Mobiele dataverbinding maken
+  // -----------------------------------------------
+
+  if (!waitForNetworkAndData()) {
+    return;
+  }
+
+  // -----------------------------------------------
+  // Vercel-tests
+  // -----------------------------------------------
+
+  SerialMon.println();
+  SerialMon.println("Start MeasureMate API-tests...");
+
+  bool healthSuccess = testHealthEndpoint();
+
+  delay(3000);
+
+  bool postSuccess = postSensorData(SENSOR_VALUE);
+
+  SerialMon.println();
+  SerialMon.println("======================================");
+  SerialMon.println(" Resultaat");
+  SerialMon.println("======================================");
+
+  SerialMon.print("Health GET: ");
+  SerialMon.println(
+    healthSuccess ? "GESLAAGD" : "MISLUKT"
+  );
+
+  SerialMon.print("Sensor POST: ");
+  SerialMon.println(
+    postSuccess ? "GESLAAGD" : "MISLUKT"
+  );
+
+  SerialMon.println();
+  SerialMon.println(
+    "Antennewaarden worden iedere 30 seconden gemeten."
+  );
+
+  lastSignalTest = millis();
+}
+
+
+// ==================================================
+// Loop
+// ==================================================
+
+void loop() {
+  if (millis() - lastSignalTest >= SIGNAL_INTERVAL) {
+    lastSignalTest = millis();
+
+    printAntennaInformation();
+
+    SerialMon.print("Dataverbinding: ");
+
+    if (modem.isGprsConnected()) {
+      SerialMon.println("verbonden");
+
+      SerialMon.print("IP-adres: ");
+      SerialMon.println(modem.localIP());
+    } else {
+      SerialMon.println("niet verbonden");
+    }
+  }
+}
+
+
+// ==================================================
+// Netwerk en APN
+// ==================================================
+
+bool waitForNetworkAndData() {
+  SerialMon.println();
+  SerialMon.print("Wachten op mobiel netwerk... ");
+
+  if (!modem.waitForNetwork(90000L)) {
+    SerialMon.println("MISLUKT");
+
+    sendAT("AT+CEREG?", 5000);
+    sendAT("AT+COPS?", 5000);
+    sendAT("AT+CSQ", 5000);
+    sendAT("AT+CESQ", 5000);
+
+    return false;
+  }
+
+  SerialMon.println("GESLAAGD");
+
+  SerialMon.print("Netwerk verbonden: ");
+  SerialMon.println(
+    modem.isNetworkConnected() ? "ja" : "nee"
+  );
+
+  // PDP-context expliciet instellen.
+  sendAT(
+    "AT+CGDCONT=1,\"IP\",\"" + String(APN) + "\"",
+    5000
+  );
+
+  SerialMon.print("Verbinden met APN: ");
+  SerialMon.println(APN);
+
+  if (!modem.gprsConnect(APN, APN_USER, APN_PASS)) {
+    SerialMon.println("APN-verbinding mislukt.");
+
+    sendAT("AT+CGATT?", 5000);
+    sendAT("AT+CGACT?", 5000);
+    sendAT("AT+CGDCONT?", 5000);
+
+    return false;
+  }
+
+  SerialMon.println("Mobiele data verbonden.");
+
+  SerialMon.print("IP-adres: ");
+  SerialMon.println(modem.localIP());
+
+  return true;
+}
+
+
+// ==================================================
+// Antenne- en signaalinformatie
+// ==================================================
+
+void printAntennaInformation() {
+  SerialMon.println();
+  SerialMon.println("======================================");
+  SerialMon.println(" Antenne- en netwerkinformatie");
+  SerialMon.println("======================================");
+
+  String csqResponse = sendAT("AT+CSQ", 3000);
+  printCSQ(csqResponse);
+
+  String cesqResponse = sendAT("AT+CESQ", 3000);
+  printCESQ(cesqResponse);
+
+  String ceregResponse = sendAT("AT+CEREG?", 3000);
+  String ceregLine = findLine(
+    ceregResponse,
+    "+CEREG:"
+  );
+
+  SerialMon.print("LTE-registratie : ");
+
+  if (ceregLine.length() > 0) {
+    SerialMon.println(ceregLine);
+  } else {
+    SerialMon.println("onbekend");
+  }
+
+  String copsResponse = sendAT("AT+COPS?", 5000);
+  String copsLine = findLine(
+    copsResponse,
+    "+COPS:"
+  );
+
+  SerialMon.print("Provider         : ");
+
+  if (copsLine.length() > 0) {
+    SerialMon.println(copsLine);
+  } else {
+    SerialMon.println("onbekend");
+  }
+
+  String cpsiResponse = sendAT("AT+CPSI?", 5000);
+  String cpsiLine = findLine(
+    cpsiResponse,
+    "+CPSI:"
+  );
+
+  SerialMon.print("LTE-cel/band     : ");
+
+  if (cpsiLine.length() > 0) {
+    SerialMon.println(cpsiLine);
+  } else {
+    SerialMon.println("niet beschikbaar");
+  }
+}
+
+
+// ==================================================
+// CSQ verwerken
+// ==================================================
+
+void printCSQ(const String& response) {
+  String line = findLine(response, "+CSQ:");
+
+  if (line.length() == 0) {
+    SerialMon.println("CSQ              : niet beschikbaar");
+    return;
+  }
+
+  int colon = line.indexOf(':');
+  int comma = line.indexOf(',');
+
+  if (colon == -1 || comma == -1) {
+    SerialMon.println("CSQ              : ongeldig antwoord");
+    return;
+  }
+
+  int csq = line
+    .substring(colon + 1, comma)
+    .toInt();
+
+  int ber = line
+    .substring(comma + 1)
+    .toInt();
+
+  SerialMon.print("CSQ              : ");
+  SerialMon.print(csq);
+  SerialMon.print(" / 31");
+
+  if (csq >= 0 && csq <= 31) {
+    int rssi = -113 + (2 * csq);
+
+    SerialMon.print("  (~");
+    SerialMon.print(rssi);
+    SerialMon.println(" dBm)");
+  } else {
+    SerialMon.println("  (onbekend)");
+  }
+
+  SerialMon.print("Bit error rate   : ");
+
+  if (ber == 99) {
+    SerialMon.println("niet beschikbaar");
+  } else {
+    SerialMon.println(ber);
+  }
+}
+
+
+// ==================================================
+// CESQ verwerken
+//
+// Antwoord:
+// +CESQ: rxlev,ber,rscp,ecno,rsrq,rsrp
+//
+// LTE RSRQ:
+// -19,5 + 0,5 × code
+//
+// LTE RSRP:
+// -140 + code
+// ==================================================
+
+void printCESQ(const String& response) {
+  String line = findLine(response, "+CESQ:");
+
+  if (line.length() == 0) {
+    SerialMon.println(
+      "LTE RSRP         : niet beschikbaar"
+    );
+    SerialMon.println(
+      "LTE RSRQ         : niet beschikbaar"
+    );
+    return;
+  }
+
+  int colon = line.indexOf(':');
+
+  if (colon == -1) {
+    SerialMon.println(
+      "CESQ             : ongeldig antwoord"
+    );
+    return;
+  }
+
+  String values = line.substring(colon + 1);
+  values.trim();
+
+  int rxlev;
+  int ber;
+  int rscp;
+  int ecno;
+  int rsrqCode;
+  int rsrpCode;
+
+  int parsed = sscanf(
+    values.c_str(),
+    "%d,%d,%d,%d,%d,%d",
+    &rxlev,
+    &ber,
+    &rscp,
+    &ecno,
+    &rsrqCode,
+    &rsrpCode
+  );
+
+  if (parsed != 6) {
+    SerialMon.println(
+      "CESQ             : verwerking mislukt"
+    );
+    return;
+  }
+
+  if (rsrpCode >= 0 && rsrpCode <= 97) {
+    int rsrp = -140 + rsrpCode;
+
+    SerialMon.print("LTE RSRP         : ");
+    SerialMon.print(rsrp);
+    SerialMon.println(" dBm");
+
+    printSignalRating(rsrp);
+  } else {
+    SerialMon.println(
+      "LTE RSRP         : niet beschikbaar"
+    );
+  }
+
+  if (rsrqCode >= 0 && rsrqCode <= 34) {
+    float rsrq = -19.5f + (0.5f * rsrqCode);
+
+    SerialMon.print("LTE RSRQ         : ");
+    SerialMon.print(rsrq, 1);
+    SerialMon.println(" dB");
+  } else {
+    SerialMon.println(
+      "LTE RSRQ         : niet beschikbaar"
+    );
+  }
+}
+
+
+void printSignalRating(int rsrp) {
+  SerialMon.print("Signaal          : ");
+
+  if (rsrp >= -80) {
+    SerialMon.println("uitstekend");
+  } else if (rsrp >= -90) {
+    SerialMon.println("goed");
+  } else if (rsrp >= -100) {
+    SerialMon.println("redelijk");
+  } else if (rsrp >= -110) {
+    SerialMon.println("zwak");
+  } else {
+    SerialMon.println("zeer zwak");
+  }
+}
+
+
+// ==================================================
+// GET /api/health
+// ==================================================
+
+bool testHealthEndpoint() {
+  SerialMon.println();
+  SerialMon.println("======================================");
+  SerialMon.println(" GET /api/health");
+  SerialMon.println("======================================");
+
+  sendAT("AT+HTTPTERM", 2000);
+
+  String initResponse = sendAT(
+    "AT+HTTPINIT",
+    5000
+  );
+
+  if (initResponse.indexOf("OK") == -1) {
+    SerialMon.println("HTTPINIT mislukt.");
+    return false;
+  }
+
+  sendAT("AT+HTTPPARA=\"CID\",1", 5000);
+
+  configureSSL();
+
+  sendAT(
+    "AT+HTTPPARA=\"REDIR\",1",
+    5000
+  );
+
+  sendAT(
+    "AT+HTTPPARA=\"URL\",\"" +
+    String(HEALTH_URL) +
+    "\"",
+    5000
+  );
+
+  SerialMon.println("GET uitvoeren...");
+
+  sendAT("AT+HTTPACTION=0", 5000);
+
+  String result = waitForHttpAction(30000);
+
+  SerialMon.println("HTTP-resultaat:");
+  SerialMon.println(
+    result.length() > 0 ? result : "[geen antwoord]"
+  );
+
+  bool success =
+    result.indexOf("+HTTPACTION: 0,200") != -1 ||
+    result.indexOf("+HTTPACTION:0,200") != -1;
+
+  SerialMon.println("Serverantwoord:");
+
+  sendAT("AT+HTTPREAD=0,512", 10000);
+  sendAT("AT+HTTPTERM", 2000);
+
+  return success;
+}
+
+
+// ==================================================
+// POST /api/sensor-data
+// ==================================================
+
+bool postSensorData(float value) {
+  SerialMon.println();
+  SerialMon.println("======================================");
+  SerialMon.println(" POST /api/sensor-data");
+  SerialMon.println("======================================");
+
+  String payload =
+    "{\"value\":" +
+    String(value, 1) +
+    "}";
+
+  SerialMon.print("Payload: ");
+  SerialMon.println(payload);
+
+  sendAT("AT+HTTPTERM", 2000);
+
+  String initResponse = sendAT(
+    "AT+HTTPINIT",
+    5000
+  );
+
+  if (initResponse.indexOf("OK") == -1) {
+    SerialMon.println("HTTPINIT mislukt.");
+    return false;
+  }
+
+  sendAT("AT+HTTPPARA=\"CID\",1", 5000);
+
+  configureSSL();
+
+  sendAT(
+    "AT+HTTPPARA=\"REDIR\",1",
+    5000
+  );
+
+  sendAT(
+    "AT+HTTPPARA=\"URL\",\"" +
+    String(DATA_URL) +
+    "\"",
+    5000
+  );
+
+  sendAT(
+    "AT+HTTPPARA=\"CONTENT\",\"application/json\"",
+    5000
+  );
+
+  String authorization =
+    "Authorization: Bearer " +
+    String(API_KEY);
+
+  String headerCommand =
+    "AT+HTTPPARA=\"USERDATA\",\"" +
+    authorization +
+    "\"";
+
+  String headerResponse = sendAT(
+    headerCommand,
+    5000
+  );
+
+  if (headerResponse.indexOf("OK") == -1) {
+    SerialMon.println(
+      "WAARSCHUWING: Authorization-header mislukt."
+    );
+  }
+
+  String dataCommand =
+    "AT+HTTPDATA=" +
+    String(payload.length()) +
+    ",10000";
+
+  while (SerialAT.available()) {
+    SerialAT.read();
+  }
+
+  SerialMon.print(">> ");
+  SerialMon.println(dataCommand);
+
+  SerialAT.print(dataCommand);
+  SerialAT.print("\r\n");
+
+  if (!waitForDownloadPrompt(5000)) {
+    SerialMon.println(
+      "Geen DOWNLOAD-prompt ontvangen."
+    );
+
+    sendAT("AT+HTTPTERM", 2000);
+    return false;
+  }
+
+  SerialMon.println("Payload versturen...");
+
+  SerialAT.print(payload);
+
+  String uploadResponse = readModem(3000);
+
+  SerialMon.print("Uploadantwoord: ");
+  SerialMon.println(
+    uploadResponse.length() > 0
+      ? uploadResponse
+      : "[geen antwoord]"
+  );
+
+  SerialMon.println("POST uitvoeren...");
+
+  sendAT("AT+HTTPACTION=1", 5000);
+
+  String result = waitForHttpAction(30000);
+
+  SerialMon.println("HTTP-resultaat:");
+  SerialMon.println(
+    result.length() > 0 ? result : "[geen antwoord]"
+  );
+
+  bool success =
+    result.indexOf("+HTTPACTION: 1,200") != -1 ||
+    result.indexOf("+HTTPACTION:1,200") != -1 ||
+    result.indexOf("+HTTPACTION: 1,201") != -1 ||
+    result.indexOf("+HTTPACTION:1,201") != -1;
+
+  SerialMon.println("Serverantwoord:");
+
+  sendAT("AT+HTTPREAD=0,512", 10000);
+  sendAT("AT+HTTPTERM", 2000);
+
+  return success;
+}
+
+
+// ==================================================
+// SSL-instellingen SIM7600
+// ==================================================
+
+void configureSSL() {
+  sendAT("AT+CCHSTOP", 3000);
+
+  sendAT(
+    "AT+CSSLCFG=\"sslversion\",0,4",
+    5000
+  );
+
+  sendAT(
+    "AT+CSSLCFG=\"authmode\",0,0",
+    5000
+  );
+
+  sendAT(
+    "AT+CSSLCFG=\"enableSNI\",0,1",
+    5000
+  );
+
+  sendAT(
+    "AT+HTTPPARA=\"SSLCFG\",0",
+    5000
+  );
+}
+
+
+// ==================================================
+// Modem inschakelen
+// ==================================================
+
+bool startModem() {
+  SerialMon.println(
+    "Controleren of de modem aanstaat..."
+  );
+
+  if (modemResponds()) {
+    SerialMon.println("Modem reageert.");
+    return true;
+  }
+
+  SerialMon.println(
+    "Geen reactie. PWRKEY activeren..."
+  );
+
+  pulsePowerKey();
+
+  SerialMon.println(
+    "20 seconden wachten op modem..."
+  );
+
+  delay(20000);
+
+  if (modemResponds()) {
+    SerialMon.println("Modem is opgestart.");
+    return true;
+  }
+
+  SerialMon.println(
+    "Nog geen reactie. Tweede poging..."
+  );
+
+  pulsePowerKey();
+  delay(20000);
+
+  return modemResponds();
+}
+
+
+bool modemResponds() {
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    String response = sendAT("AT", 2000);
+
+    if (response.indexOf("OK") != -1) {
+      return true;
+    }
+
+    delay(1000);
+  }
+
+  return false;
+}
+
+
+void pulsePowerKey() {
+  pinMode(MODEM_PWRKEY, OUTPUT);
+
+  digitalWrite(MODEM_PWRKEY, LOW);
+  delay(100);
+
+  digitalWrite(MODEM_PWRKEY, HIGH);
+  delay(3000);
+
+  digitalWrite(MODEM_PWRKEY, LOW);
+}
+
+
+// ==================================================
+// AT-communicatie
+// ==================================================
+
+String sendAT(
+  const String& command,
+  unsigned long timeout
+) {
+  while (SerialAT.available()) {
+    SerialAT.read();
+  }
+
+  SerialMon.print(">> ");
+  SerialMon.println(command);
+
+  SerialAT.print(command);
+  SerialAT.print("\r\n");
+
+  String response;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      response += (char)SerialAT.read();
+    }
+
+    if (
+      response.indexOf("\r\nOK\r\n") != -1 ||
+      response.indexOf("\r\nERROR\r\n") != -1
+    ) {
+      delay(100);
+
+      while (SerialAT.available()) {
+        response += (char)SerialAT.read();
+      }
+
+      break;
+    }
+  }
+
+  SerialMon.print("<< ");
+
+  if (response.length() == 0) {
+    SerialMon.println("[geen antwoord]");
+  } else {
+    SerialMon.println(response);
+  }
+
+  return response;
+}
+
+
+String readModem(unsigned long timeout) {
+  String response;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      response += (char)SerialAT.read();
+    }
+  }
+
+  return response;
+}
+
+
+String findLine(
+  const String& response,
+  const char* prefix
+) {
+  int start = response.indexOf(prefix);
+
+  if (start == -1) {
+    return "";
+  }
+
+  int end = response.indexOf('\n', start);
+
+  if (end == -1) {
+    end = response.length();
+  }
+
+  String line = response.substring(start, end);
+  line.trim();
+
+  return line;
+}
+
+
+// ==================================================
+// HTTP-antwoorden afwachten
+// ==================================================
+
+bool waitForDownloadPrompt(unsigned long timeout) {
+  String response;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      response += (char)SerialAT.read();
+    }
+
+    if (response.indexOf("DOWNLOAD") != -1) {
+      SerialMon.print("<< ");
+      SerialMon.println(response);
+      return true;
+    }
+
+    if (response.indexOf("ERROR") != -1) {
+      SerialMon.print("<< ");
+      SerialMon.println(response);
+      return false;
+    }
+  }
+
+  SerialMon.print("<< ");
+
+  if (response.length() == 0) {
+    SerialMon.println("[geen antwoord]");
+  } else {
+    SerialMon.println(response);
+  }
+
+  return false;
+}
+
+
+String waitForHttpAction(unsigned long timeout) {
+  String response;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      response += (char)SerialAT.read();
+    }
+
+    if (response.indexOf("+HTTPACTION:") != -1) {
+      delay(500);
+
+      while (SerialAT.available()) {
+        response += (char)SerialAT.read();
+      }
+
+      break;
+    }
+  }
+
+  return response;
+}
