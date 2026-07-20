@@ -1,0 +1,903 @@
+/*
+  Maduino Zero 4G SIM7600 -> MeasureMate Dashboard
+  ------------------------------------------------
+  Reads:
+  - pH sensor
+  - EC sensor
+  - DS18B20 temperature sensor
+  - Analog pressure sensor
+
+  Sends every 10 minutes to:
+  https://measuremate.vercel.app/api/sensor-data
+
+  IMPORTANT:
+  Your MeasureMate API accepts one value per POST.
+  Therefore create 4 sensors in the dashboard and paste 4 API keys below:
+  - pH sensor API key
+  - EC sensor API key
+  - temperature sensor API key
+  - pressure sensor API key
+
+  Confirmed working modem settings:
+  - Debug serial: SerialUSB
+  - Modem serial: Serial1
+  - Modem baudrate: 115200
+  - PWRKEY pin: 6
+  - APN AlwaysConnected: globaldata.iot
+*/
+
+#define TINY_GSM_MODEM_SIM7600
+
+#include <TinyGsmClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <math.h>
+
+// ============================================================================
+// USER CONFIG — API KEYS
+// ============================================================================
+
+// Maak in je dashboard 4 sensors aan en plak hier de API keys.
+const char PH_API_KEY[]       = "070b752c-5962-4e14-b13e-47cd69784610";
+const char EC_API_KEY[]       = "6dd6e1db-a130-41f6-8d49-4ef0b4349ca1";
+const char TEMP_API_KEY[]     = "e16e6574-a6c8-4fc1-8e8b-ae446e7b8946";
+const char PRESSURE_API_KEY[] = "f0a54cc9-8d30-4790-aa51-3b6ac8b0c477";
+
+// ============================================================================
+// USER CONFIG — NETWORK / API
+// ============================================================================
+
+const char apn[]      = "globaldata.iot";
+const char apn_user[] = "";
+const char apn_pass[] = "";
+
+const char dataUrl[] = "https://measuremate.vercel.app/api/sensor-data";
+
+// Elke 10 minuten uitlezen en versturen
+const unsigned long MEASURE_INTERVAL_MS = 10UL * 60UL * 1000UL;
+
+// ============================================================================
+// USER CONFIG — SENSOR PINS
+// ============================================================================
+
+// Pas deze pins aan op jouw bedrading.
+#define PIN_PH_ANALOG        A0
+#define PIN_EC_ANALOG        A1
+#define PIN_PRESSURE_ANALOG  A2
+#define PIN_DS18B20          4
+
+// ============================================================================
+// USER CONFIG — ADC SETTINGS
+// ============================================================================
+
+// Maduino Zero / SAMD kan 12-bit ADC gebruiken.
+#define ADC_RESOLUTION_VALUE 4095.0f
+#define ADC_REF_VOLTAGE      3.3f
+
+// ============================================================================
+// USER CONFIG — pH CALIBRATION
+// ============================================================================
+
+// Overgenomen uit jouw Heltec calibratie voor NODE_ID 4.
+// Pas deze aan na echte calibratie met pH 7 en pH 4 vloeistof.
+#define PH_NEUTRAL_VOLTAGE  1.489f
+#define PH_ACID_VOLTAGE     2.032f
+
+// ============================================================================
+// USER CONFIG — EC CALIBRATION
+// ============================================================================
+
+// Overgenomen uit jouw Heltec calibratie voor NODE_ID 4.
+#define EC_GAIN              0.961f
+#define EC_TEMP_COEFFICIENT  0.0185f
+
+// ============================================================================
+// USER CONFIG — TEMPERATURE CALIBRATION
+// ============================================================================
+
+#define TEMP_OFFSET_C        0.00f
+
+// ============================================================================
+// USER CONFIG — PRESSURE SENSOR CALIBRATION
+// ============================================================================
+//
+// BELANGRIJK:
+// Deze waarden hangen af van jouw druksensor.
+// Veel analoge druksensoren zijn bijvoorbeeld 0.5V - 4.5V voor hun meetbereik.
+// Vul hieronder jouw echte sensorbereik in.
+//
+// Voorbeeld hieronder:
+// 0.5V = 0 kPa
+// 4.5V = 100 kPa
+//
+// Als jouw sensor bijvoorbeeld 0-5 meter waterkolom meet:
+// 5 mH2O ≈ 49.0 kPa
+// zet PRESSURE_MAX_KPA dan op 49.0f.
+//
+
+#define PRESSURE_MIN_VOLTAGE 0.50f
+#define PRESSURE_MAX_VOLTAGE 4.50f
+#define PRESSURE_MIN_KPA     0.0f
+#define PRESSURE_MAX_KPA     100.0f
+
+// ============================================================================
+// MODEM / SERIAL SETUP
+// ============================================================================
+
+#define MODEM_PWRKEY 6
+
+#define SerialMon SerialUSB
+#define SerialAT  Serial1
+
+#define MODEM_BAUD 115200
+
+TinyGsm modem(SerialAT);
+
+// ============================================================================
+// DS18B20 SETUP
+// ============================================================================
+
+OneWire oneWire(PIN_DS18B20);
+DallasTemperature tempSensor(&oneWire);
+
+// ============================================================================
+// DATA STRUCT
+// ============================================================================
+
+struct SensorReadings {
+  float pH;
+  float ec;
+  float temperature;
+  float pressureKpa;
+
+  bool pH_ok;
+  bool ec_ok;
+  bool temperature_ok;
+  bool pressure_ok;
+};
+
+SensorReadings lastReadings;
+
+unsigned long lastMeasureMillis = 0;
+bool firstRun = true;
+
+// ============================================================================
+// FUNCTION DECLARATIONS
+// ============================================================================
+
+String sendAT(const String &cmd, unsigned long timeout);
+String readModem(unsigned long timeout);
+bool waitForAT(unsigned long totalTimeout);
+void pulsePowerKey();
+bool ensureModemOn();
+void printModemInfo();
+bool waitForDownloadPrompt(unsigned long timeout);
+String waitForHttpAction(unsigned long timeout);
+void configureSSL();
+
+bool connectModemAndNetwork();
+void readAllSensors(SensorReadings &data);
+
+float analogToVoltage(float raw);
+float readAnalogAverage(int pin);
+float readPH();
+float readEC(float tempC);
+float readTemperature();
+float readPressureKpa();
+
+bool postSensorValue(const char *apiKey, const char *sensorName, float value, uint8_t decimals);
+void sendAllValues(const SensorReadings &data);
+
+void printSensorSummary(const SensorReadings &data);
+
+// ============================================================================
+// SETUP
+// ============================================================================
+
+void setup() {
+  SerialMon.begin(115200);
+  delay(3000);
+
+  SerialMon.println();
+  SerialMon.println("==============================================");
+  SerialMon.println(" Maduino Zero 4G SIM7600 MeasureMate 4-sensor ");
+  SerialMon.println("==============================================");
+
+  // ADC setup
+  analogReadResolution(12);
+
+  // Temperature sensor setup
+  tempSensor.begin();
+  tempSensor.setResolution(12);
+  tempSensor.setWaitForConversion(true);
+
+  SerialMon.print("DS18B20 devices found: ");
+  SerialMon.println(tempSensor.getDeviceCount());
+
+  // Modem serial
+  SerialMon.println("Starting Serial1 to modem...");
+  SerialAT.begin(MODEM_BAUD);
+  delay(1000);
+
+  if (!connectModemAndNetwork()) {
+    SerialMon.println("ERROR: Network setup failed. Code stopped.");
+    return;
+  }
+
+  SerialMon.println();
+  SerialMon.println("Setup complete. First measurement will run now.");
+}
+
+// ============================================================================
+// LOOP
+// ============================================================================
+
+void loop() {
+  unsigned long now = millis();
+
+  if (firstRun || now - lastMeasureMillis >= MEASURE_INTERVAL_MS) {
+    firstRun = false;
+    lastMeasureMillis = now;
+
+    SerialMon.println();
+    SerialMon.println("==============================================");
+    SerialMon.println(" Reading sensors and sending to MeasureMate...");
+    SerialMon.println("==============================================");
+
+    readAllSensors(lastReadings);
+    printSensorSummary(lastReadings);
+
+    sendAllValues(lastReadings);
+
+    SerialMon.println();
+    SerialMon.println("Cycle done. Next cycle in 10 minutes.");
+  }
+
+  delay(1000);
+}
+
+// ============================================================================
+// NETWORK SETUP
+// ============================================================================
+
+bool connectModemAndNetwork() {
+  SerialMon.println("Checking if modem already responds...");
+
+  if (!ensureModemOn()) {
+    SerialMon.println("ERROR: Could not get OK response from modem.");
+    return false;
+  }
+
+  SerialMon.println("AT response OK.");
+  sendAT("ATE0", 3000);
+
+  SerialMon.println();
+  SerialMon.println("Checking SIM status...");
+  sendAT("AT+CPIN?", 5000);
+
+  SerialMon.println("Checking signal quality...");
+  sendAT("AT+CSQ", 5000);
+
+  SerialMon.println("Checking network registration...");
+  sendAT("AT+CREG?", 5000);
+  sendAT("AT+CEREG?", 5000);
+  sendAT("AT+COPS?", 5000);
+
+  SerialMon.println();
+  SerialMon.println("Initializing modem with TinyGSM...");
+
+  if (!modem.init()) {
+    SerialMon.println("modem.init() failed. Trying modem.restart()...");
+    if (!modem.restart()) {
+      SerialMon.println("modem.restart() also failed.");
+      return false;
+    }
+  }
+
+  printModemInfo();
+
+  SerialMon.println();
+  SerialMon.print("Waiting for mobile network... ");
+
+  if (!modem.waitForNetwork(90000L)) {
+    SerialMon.println("FAIL");
+    sendAT("AT+COPS?", 5000);
+    sendAT("AT+CREG?", 5000);
+    sendAT("AT+CEREG?", 5000);
+    sendAT("AT+CSQ", 5000);
+    return false;
+  }
+
+  SerialMon.println("SUCCESS");
+
+  SerialMon.println("Setting PDP context/APN manually...");
+  sendAT("AT+CGDCONT=1,\"IP\",\"globaldata.iot\"", 5000);
+
+  SerialMon.print("Connecting to APN: ");
+  SerialMon.println(apn);
+
+  if (!modem.gprsConnect(apn, apn_user, apn_pass)) {
+    SerialMon.println("GPRS connect FAIL");
+    sendAT("AT+CGATT?", 5000);
+    sendAT("AT+CGACT?", 5000);
+    sendAT("AT+CGDCONT?", 5000);
+    return false;
+  }
+
+  SerialMon.println("GPRS connected.");
+  SerialMon.print("Local IP: ");
+  SerialMon.println(modem.localIP());
+
+  return true;
+}
+
+// ============================================================================
+// SENSOR READ FUNCTIONS
+// ============================================================================
+
+void readAllSensors(SensorReadings &data) {
+  data.pH_ok = false;
+  data.ec_ok = false;
+  data.temperature_ok = false;
+  data.pressure_ok = false;
+
+  data.temperature = readTemperature();
+
+  float ecTemp = 25.0f;
+  if (!isnan(data.temperature)) {
+    data.temperature_ok = true;
+    ecTemp = data.temperature;
+  } else {
+    data.temperature = 25.0f;
+  }
+
+  data.pH = readPH();
+  if (!isnan(data.pH) && data.pH >= 0.0f && data.pH <= 14.0f) {
+    data.pH_ok = true;
+  }
+
+  data.ec = readEC(ecTemp);
+  if (!isnan(data.ec) && data.ec >= 0.0f && data.ec <= 20000.0f) {
+    data.ec_ok = true;
+  }
+
+  data.pressureKpa = readPressureKpa();
+  if (!isnan(data.pressureKpa)) {
+    data.pressure_ok = true;
+  }
+}
+
+float analogToVoltage(float raw) {
+  return raw / ADC_RESOLUTION_VALUE * ADC_REF_VOLTAGE;
+}
+
+// 10 samples, discard min and max, average the remaining 8
+float readAnalogAverage(int pin) {
+  int readings[10];
+
+  for (int i = 0; i < 10; i++) {
+    readings[i] = analogRead(pin);
+    delay(10);
+  }
+
+  int minIdx = 0;
+  int maxIdx = 0;
+
+  for (int i = 1; i < 10; i++) {
+    if (readings[i] < readings[minIdx]) {
+      minIdx = i;
+    }
+
+    if (readings[i] > readings[maxIdx]) {
+      maxIdx = i;
+    }
+  }
+
+  long sum = 0;
+
+  for (int i = 0; i < 10; i++) {
+    if (i != minIdx && i != maxIdx) {
+      sum += readings[i];
+    }
+  }
+
+  return (float)sum / 8.0f;
+}
+
+float readPH() {
+  float raw = readAnalogAverage(PIN_PH_ANALOG);
+  float voltage = analogToVoltage(raw);
+
+  float slope = (7.0f - 4.0f) / (PH_NEUTRAL_VOLTAGE - PH_ACID_VOLTAGE);
+  float pH = 7.0f + (PH_NEUTRAL_VOLTAGE - voltage) * slope;
+
+  pH = constrain(pH, 0.0f, 14.0f);
+
+  SerialMon.print("[pH] raw=");
+  SerialMon.print(raw, 1);
+  SerialMon.print(" voltage=");
+  SerialMon.print(voltage, 3);
+  SerialMon.print("V pH=");
+  SerialMon.println(pH, 2);
+
+  return pH;
+}
+
+float readEC(float tempC) {
+  float raw = readAnalogAverage(PIN_EC_ANALOG);
+  float voltage = analogToVoltage(raw);
+
+  float ecRaw;
+
+  if (voltage < 0.01f) {
+    ecRaw = 0.0f;
+  } else {
+    ecRaw = 133.42f * voltage * voltage * voltage
+          - 255.86f * voltage * voltage
+          + 857.39f * voltage;
+  }
+
+  float ec = (ecRaw * EC_GAIN) / (1.0f + EC_TEMP_COEFFICIENT * (tempC - 25.0f));
+
+  ec = constrain(ec, 0.0f, 20000.0f);
+
+  SerialMon.print("[EC] raw=");
+  SerialMon.print(raw, 1);
+  SerialMon.print(" voltage=");
+  SerialMon.print(voltage, 3);
+  SerialMon.print("V tempComp=");
+  SerialMon.print(tempC, 2);
+  SerialMon.print("C EC=");
+  SerialMon.print(ec, 1);
+  SerialMon.println(" uS/cm");
+
+  return ec;
+}
+
+float readTemperature() {
+  tempSensor.requestTemperatures();
+
+  float tempC = tempSensor.getTempCByIndex(0);
+
+  if (tempC == DEVICE_DISCONNECTED_C || tempC < -55.0f || tempC > 125.0f) {
+    SerialMon.println("[Temp] DS18B20 FAILED");
+    return NAN;
+  }
+
+  tempC += TEMP_OFFSET_C;
+
+  SerialMon.print("[Temp] ");
+  SerialMon.print(tempC, 2);
+  SerialMon.println(" C");
+
+  return tempC;
+}
+
+float readPressureKpa() {
+  float raw = readAnalogAverage(PIN_PRESSURE_ANALOG);
+  float voltage = analogToVoltage(raw);
+
+  float pressureKpa =
+    (voltage - PRESSURE_MIN_VOLTAGE)
+    * (PRESSURE_MAX_KPA - PRESSURE_MIN_KPA)
+    / (PRESSURE_MAX_VOLTAGE - PRESSURE_MIN_VOLTAGE)
+    + PRESSURE_MIN_KPA;
+
+  if (pressureKpa < PRESSURE_MIN_KPA) {
+    pressureKpa = PRESSURE_MIN_KPA;
+  }
+
+  if (pressureKpa > PRESSURE_MAX_KPA) {
+    pressureKpa = PRESSURE_MAX_KPA;
+  }
+
+  SerialMon.print("[Pressure] raw=");
+  SerialMon.print(raw, 1);
+  SerialMon.print(" voltage=");
+  SerialMon.print(voltage, 3);
+  SerialMon.print("V pressure=");
+  SerialMon.print(pressureKpa, 2);
+  SerialMon.println(" kPa");
+
+  return pressureKpa;
+}
+
+void printSensorSummary(const SensorReadings &data) {
+  SerialMon.println();
+  SerialMon.println("Sensor summary:");
+
+  SerialMon.print("pH: ");
+  if (data.pH_ok) {
+    SerialMon.println(data.pH, 2);
+  } else {
+    SerialMon.println("ERR");
+  }
+
+  SerialMon.print("EC: ");
+  if (data.ec_ok) {
+    SerialMon.print(data.ec, 1);
+    SerialMon.println(" uS/cm");
+  } else {
+    SerialMon.println("ERR");
+  }
+
+  SerialMon.print("Temperature: ");
+  if (data.temperature_ok) {
+    SerialMon.print(data.temperature, 2);
+    SerialMon.println(" C");
+  } else {
+    SerialMon.println("ERR");
+  }
+
+  SerialMon.print("Pressure: ");
+  if (data.pressure_ok) {
+    SerialMon.print(data.pressureKpa, 2);
+    SerialMon.println(" kPa");
+  } else {
+    SerialMon.println("ERR");
+  }
+}
+
+// ============================================================================
+// SEND VALUES TO MEASUREMATE
+// ============================================================================
+
+void sendAllValues(const SensorReadings &data) {
+  bool anyFailed = false;
+
+  if (data.pH_ok) {
+    if (!postSensorValue(PH_API_KEY, "pH", data.pH, 2)) {
+      anyFailed = true;
+    }
+  } else {
+    SerialMon.println("Skipping pH upload because sensor reading is invalid.");
+  }
+
+  delay(1000);
+
+  if (data.ec_ok) {
+    if (!postSensorValue(EC_API_KEY, "EC", data.ec, 1)) {
+      anyFailed = true;
+    }
+  } else {
+    SerialMon.println("Skipping EC upload because sensor reading is invalid.");
+  }
+
+  delay(1000);
+
+  if (data.temperature_ok) {
+    if (!postSensorValue(TEMP_API_KEY, "Temperature", data.temperature, 2)) {
+      anyFailed = true;
+    }
+  } else {
+    SerialMon.println("Skipping temperature upload because sensor reading is invalid.");
+  }
+
+  delay(1000);
+
+  if (data.pressure_ok) {
+    if (!postSensorValue(PRESSURE_API_KEY, "Pressure", data.pressureKpa, 2)) {
+      anyFailed = true;
+    }
+  } else {
+    SerialMon.println("Skipping pressure upload because sensor reading is invalid.");
+  }
+
+  if (anyFailed) {
+    SerialMon.println("One or more uploads failed.");
+  } else {
+    SerialMon.println("All valid sensor values uploaded.");
+  }
+}
+
+bool postSensorValue(const char *apiKey, const char *sensorName, float value, uint8_t decimals) {
+  SerialMon.println();
+  SerialMon.print("POST sensor: ");
+  SerialMon.print(sensorName);
+  SerialMon.print(" value=");
+  SerialMon.println(value, decimals);
+
+  if (strlen(apiKey) == 0 || String(apiKey).startsWith("VUL_HIER")) {
+    SerialMon.print("ERROR: Missing API key for ");
+    SerialMon.println(sensorName);
+    return false;
+  }
+
+  String payload = "{\"value\":" + String(value, decimals) + "}";
+
+  SerialMon.print("Payload: ");
+  SerialMon.println(payload);
+
+  // Clean old HTTP session. ERROR is okay if no session exists.
+  sendAT("AT+HTTPTERM", 2000);
+
+  if (sendAT("AT+HTTPINIT", 5000).indexOf("OK") == -1) {
+    SerialMon.println("HTTPINIT failed.");
+    return false;
+  }
+
+  sendAT("AT+HTTPPARA=\"CID\",1", 5000);
+
+  configureSSL();
+
+  sendAT("AT+HTTPPARA=\"REDIR\",1", 5000);
+  sendAT("AT+HTTPPARA=\"URL\",\"" + String(dataUrl) + "\"", 5000);
+  sendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"", 5000);
+
+  String authHeader = "Authorization: Bearer " + String(apiKey);
+  String userDataCmd = "AT+HTTPPARA=\"USERDATA\",\"" + authHeader + "\"";
+
+  String userDataResp = sendAT(userDataCmd, 5000);
+
+  if (userDataResp.indexOf("OK") == -1) {
+    SerialMon.println("WARNING: Authorization header failed.");
+    sendAT("AT+HTTPTERM", 2000);
+    return false;
+  }
+
+  String dataCmd = "AT+HTTPDATA=" + String(payload.length()) + ",10000";
+
+  while (SerialAT.available()) {
+    SerialAT.read();
+  }
+
+  SerialMon.print(">> ");
+  SerialMon.println(dataCmd);
+
+  SerialAT.print(dataCmd);
+  SerialAT.print("\r\n");
+
+  if (!waitForDownloadPrompt(5000)) {
+    SerialMon.println("No DOWNLOAD prompt. Cannot send payload.");
+    sendAT("AT+HTTPTERM", 2000);
+    return false;
+  }
+
+  SerialMon.println("Sending payload body...");
+  SerialAT.print(payload);
+
+  delay(1000);
+
+  String dataResp = readModem(2000);
+
+  SerialMon.print("Payload response: ");
+  if (dataResp.length() == 0) {
+    SerialMon.println("[empty]");
+  } else {
+    SerialMon.println(dataResp);
+  }
+
+  SerialMon.println("Executing POST...");
+  sendAT("AT+HTTPACTION=1", 5000);
+
+  SerialMon.println("Waiting for +HTTPACTION result...");
+  String result = waitForHttpAction(30000);
+
+  SerialMon.println("HTTPACTION result:");
+  if (result.length() == 0) {
+    SerialMon.println("[empty]");
+  } else {
+    SerialMon.println(result);
+  }
+
+  bool success = false;
+
+  if (result.indexOf("+HTTPACTION: 1,201") != -1 || result.indexOf("+HTTPACTION: 1,200") != -1) {
+    success = true;
+  }
+
+  SerialMon.println("Reading response...");
+  sendAT("AT+HTTPREAD=0,512", 10000);
+
+  sendAT("AT+HTTPTERM", 2000);
+
+  if (success) {
+    SerialMon.print("Upload OK for ");
+    SerialMon.println(sensorName);
+  } else {
+    SerialMon.print("Upload FAILED for ");
+    SerialMon.println(sensorName);
+  }
+
+  return success;
+}
+
+// ============================================================================
+// MODEM / AT HELPERS
+// ============================================================================
+
+bool ensureModemOn() {
+  SerialMon.println("Trying AT without power pulse...");
+
+  if (waitForAT(10000)) {
+    SerialMon.println("Modem was already ON.");
+    return true;
+  }
+
+  SerialMon.println("No AT response. Sending PWRKEY pulse...");
+  pulsePowerKey();
+
+  SerialMon.println("Waiting 20 seconds for modem boot...");
+  delay(20000);
+
+  SerialMon.println("Trying AT after power pulse...");
+  if (waitForAT(15000)) {
+    SerialMon.println("Modem turned ON successfully.");
+    return true;
+  }
+
+  SerialMon.println("Still no AT response. Sending second PWRKEY pulse...");
+  pulsePowerKey();
+
+  SerialMon.println("Waiting 20 seconds again...");
+  delay(20000);
+
+  SerialMon.println("Trying AT after second power pulse...");
+  if (waitForAT(15000)) {
+    SerialMon.println("Modem responded after second pulse.");
+    return true;
+  }
+
+  return false;
+}
+
+void pulsePowerKey() {
+  pinMode(MODEM_PWRKEY, OUTPUT);
+
+  digitalWrite(MODEM_PWRKEY, LOW);
+  delay(100);
+
+  digitalWrite(MODEM_PWRKEY, HIGH);
+  delay(3000);
+
+  digitalWrite(MODEM_PWRKEY, LOW);
+}
+
+bool waitForAT(unsigned long totalTimeout) {
+  unsigned long start = millis();
+
+  while (millis() - start < totalTimeout) {
+    String resp = sendAT("AT", 3000);
+
+    if (resp.indexOf("OK") != -1) {
+      return true;
+    }
+
+    delay(1000);
+  }
+
+  return false;
+}
+
+void printModemInfo() {
+  String modemInfo = modem.getModemInfo();
+
+  SerialMon.print("Modem Info: ");
+  SerialMon.println(modemInfo);
+}
+
+String sendAT(const String &cmd, unsigned long timeout) {
+  while (SerialAT.available()) {
+    SerialAT.read();
+  }
+
+  SerialMon.print(">> ");
+  SerialMon.println(cmd);
+
+  SerialAT.print(cmd);
+  SerialAT.print("\r\n");
+
+  String resp;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      char c = SerialAT.read();
+      resp += c;
+    }
+
+    if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
+      delay(100);
+
+      while (SerialAT.available()) {
+        resp += (char)SerialAT.read();
+      }
+
+      break;
+    }
+  }
+
+  SerialMon.print("<< ");
+
+  if (resp.length() == 0) {
+    SerialMon.println("[empty]");
+  } else {
+    SerialMon.println(resp);
+  }
+
+  return resp;
+}
+
+String readModem(unsigned long timeout) {
+  String resp;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      char c = SerialAT.read();
+      resp += c;
+    }
+  }
+
+  return resp;
+}
+
+bool waitForDownloadPrompt(unsigned long timeout) {
+  String resp;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      char c = SerialAT.read();
+      resp += c;
+    }
+
+    if (resp.indexOf("DOWNLOAD") != -1) {
+      SerialMon.print("<< ");
+      SerialMon.println(resp);
+      return true;
+    }
+
+    if (resp.indexOf("ERROR") != -1) {
+      SerialMon.print("<< ");
+      SerialMon.println(resp);
+      return false;
+    }
+  }
+
+  SerialMon.print("<< ");
+
+  if (resp.length() == 0) {
+    SerialMon.println("[empty]");
+  } else {
+    SerialMon.println(resp);
+  }
+
+  return false;
+}
+
+String waitForHttpAction(unsigned long timeout) {
+  String resp;
+  unsigned long start = millis();
+
+  while (millis() - start < timeout) {
+    while (SerialAT.available()) {
+      char c = SerialAT.read();
+      resp += c;
+    }
+
+    if (resp.indexOf("+HTTPACTION:") != -1) {
+      delay(500);
+
+      while (SerialAT.available()) {
+        resp += (char)SerialAT.read();
+      }
+
+      break;
+    }
+  }
+
+  return resp;
+}
+
+void configureSSL() {
+  SerialMon.println("Configuring SSL...");
+
+  // ERROR op sommige regels is niet altijd fataal.
+  // Dit is exact de setup waarmee jouw /api/health en /api/sensor-data werkten.
+  sendAT("AT+CCHSTOP", 3000);
+  sendAT("AT+CSSLCFG=\"sslversion\",0,4", 5000);
+  sendAT("AT+CSSLCFG=\"authmode\",0,0", 5000);
+  sendAT("AT+CSSLCFG=\"enableSNI\",0,1", 5000);
+  sendAT("AT+HTTPPARA=\"SSLCFG\",0", 5000);
+}
